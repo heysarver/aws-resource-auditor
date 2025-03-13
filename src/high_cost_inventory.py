@@ -11,8 +11,19 @@ This module collects information about potentially high-cost AWS services:
 
 import logging
 import boto3
+import botocore.exceptions
+from botocore.config import Config
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
+
+# Configure retry strategy for AWS API rate limits
+retry_config = Config(
+    retries={
+        'max_attempts': 10,
+        'mode': 'adaptive'
+    }
+)
 
 def collect_high_cost_services(profile_name=None, role_arn=None, regions=None, session=None, account_id=None, account_name=None):
     """
@@ -78,12 +89,12 @@ def collect_high_cost_services(profile_name=None, role_arn=None, regions=None, s
             logger.error(f"Error getting account ID: {e}")
             account_id = "Unknown"
     
-    # Collect ELBs and NAT Gateways from each region
-    for region in regions:
-        # Collect Elastic Load Balancers (both Classic and Application/Network)
+    # Define worker functions for each service type
+    def collect_elbs(region):
+        elbs = []
         try:
-            # Classic Load Balancers
-            elb_client = session.client('elb', region_name=region)
+            # Collect Classic Load Balancers
+            elb_client = session.client('elb', region_name=region, config=retry_config)
             classic_lbs = elb_client.describe_load_balancers().get('LoadBalancerDescriptions', [])
             
             for lb in classic_lbs:
@@ -92,142 +103,162 @@ def collect_high_cost_services(profile_name=None, role_arn=None, regions=None, s
                     'DNSName': lb['DNSName'],
                     'Type': 'classic',
                     'Scheme': lb.get('Scheme', 'N/A'),
-                    'CreatedTime': lb['CreatedTime'].strftime('%Y-%m-%d %H:%M:%S'),
                     'Region': region,
                     'AccountId': account_id,
                     'AccountName': account_name if account_name else 'N/A'
                 }
-                high_cost_services['elbs'].append(lb_info)
+                elbs.append(lb_info)
             
-            # Application and Network Load Balancers
-            elbv2_client = session.client('elbv2', region_name=region)
+            # Collect Application and Network Load Balancers
+            elbv2_client = session.client('elbv2', region_name=region, config=retry_config)
             v2_lbs = elbv2_client.describe_load_balancers().get('LoadBalancers', [])
             
             for lb in v2_lbs:
                 lb_info = {
                     'LoadBalancerName': lb['LoadBalancerName'],
                     'DNSName': lb['DNSName'],
-                    'Type': lb['Type'].lower(),
+                    'Type': lb['Type'],
                     'Scheme': lb.get('Scheme', 'N/A'),
-                    'CreatedTime': lb['CreatedTime'].strftime('%Y-%m-%d %H:%M:%S'),
                     'Region': region,
                     'AccountId': account_id,
                     'AccountName': account_name if account_name else 'N/A'
                 }
-                high_cost_services['elbs'].append(lb_info)
+                elbs.append(lb_info)
             
-            logger.info(f"Found {len(classic_lbs) + len(v2_lbs)} ELBs in region {region}")
+            logger.info(f"Found {len(elbs)} ELBs in region {region}")
+            return elbs
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'AuthFailure':
+                logger.warning(f"Authentication failure in region {region} for ELB. The region may not be enabled for your account.")
+            elif e.response['Error']['Code'] == 'UnauthorizedOperation':
+                logger.error(f"Unauthorized operation in region {region} for ELB. Check your IAM permissions.")
+            else:
+                logger.error(f"Error collecting ELBs in region {region}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error collecting ELBs in region {region}: {e}")
-        
-        # Collect NAT Gateways
+            logger.error(f"Unexpected error collecting ELBs in region {region}: {e}")
+            return []
+    
+    def collect_nat_gateways(region):
+        nat_gateways = []
         try:
-            ec2_client = session.client('ec2', region_name=region)
-            nat_gateways = ec2_client.describe_nat_gateways().get('NatGateways', [])
+            ec2_client = session.client('ec2', region_name=region, config=retry_config)
+            nats = ec2_client.describe_nat_gateways().get('NatGateways', [])
             
-            for nat in nat_gateways:
+            for nat in nats:
                 nat_info = {
                     'NatGatewayId': nat['NatGatewayId'],
                     'State': nat['State'],
-                    'SubnetId': nat['SubnetId'],
-                    'VpcId': nat['VpcId'],
-                    'CreatedTime': nat['CreateTime'].strftime('%Y-%m-%d %H:%M:%S') if 'CreateTime' in nat else 'N/A',
+                    'SubnetId': nat.get('SubnetId', 'N/A'),
+                    'VpcId': nat.get('VpcId', 'N/A'),
                     'Region': region,
                     'AccountId': account_id,
                     'AccountName': account_name if account_name else 'N/A'
                 }
-                
-                # Extract name from tags
-                if 'Tags' in nat:
-                    for tag in nat['Tags']:
-                        if tag['Key'] == 'Name':
-                            nat_info['Name'] = tag['Value']
-                            break
-                
-                if 'Name' not in nat_info:
-                    nat_info['Name'] = 'N/A'
-                
-                high_cost_services['nat_gateways'].append(nat_info)
+                nat_gateways.append(nat_info)
             
             logger.info(f"Found {len(nat_gateways)} NAT Gateways in region {region}")
+            return nat_gateways
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'AuthFailure':
+                logger.warning(f"Authentication failure in region {region} for NAT Gateways. The region may not be enabled for your account.")
+            elif e.response['Error']['Code'] == 'UnauthorizedOperation':
+                logger.error(f"Unauthorized operation in region {region} for NAT Gateways. Check your IAM permissions.")
+            else:
+                logger.error(f"Error collecting NAT Gateways in region {region}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error collecting NAT Gateways in region {region}: {e}")
-        
-        # Collect RDS Instances
+            logger.error(f"Unexpected error collecting NAT Gateways in region {region}: {e}")
+            return []
+    
+    def collect_rds_instances(region):
+        rds_instances = []
         try:
-            rds_client = session.client('rds', region_name=region)
-            rds_instances = rds_client.describe_db_instances().get('DBInstances', [])
+            rds_client = session.client('rds', region_name=region, config=retry_config)
+            instances = rds_client.describe_db_instances().get('DBInstances', [])
             
-            for instance in rds_instances:
+            for instance in instances:
                 instance_info = {
                     'DBInstanceIdentifier': instance['DBInstanceIdentifier'],
                     'Engine': instance['Engine'],
                     'EngineVersion': instance['EngineVersion'],
                     'DBInstanceClass': instance['DBInstanceClass'],
                     'AllocatedStorage': instance['AllocatedStorage'],
-                    'StorageType': instance['StorageType'],
                     'MultiAZ': instance['MultiAZ'],
-                    'Status': instance['DBInstanceStatus'],
                     'Region': region,
                     'AccountId': account_id,
                     'AccountName': account_name if account_name else 'N/A'
                 }
-                high_cost_services['rds_instances'].append(instance_info)
+                rds_instances.append(instance_info)
             
-            logger.info(f"Found {len(rds_instances)} RDS Instances in region {region}")
+            logger.info(f"Found {len(rds_instances)} RDS instances in region {region}")
+            return rds_instances
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'AuthFailure':
+                logger.warning(f"Authentication failure in region {region} for RDS. The region may not be enabled for your account.")
+            elif e.response['Error']['Code'] == 'UnauthorizedOperation':
+                logger.error(f"Unauthorized operation in region {region} for RDS. Check your IAM permissions.")
+            else:
+                logger.error(f"Error collecting RDS instances in region {region}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error collecting RDS Instances in region {region}: {e}")
+            logger.error(f"Unexpected error collecting RDS instances in region {region}: {e}")
+            return []
     
-    # Collect S3 Buckets (global service)
+    # Collect S3 buckets (global service, only need to do once)
     try:
-        s3_client = session.client('s3')
+        s3_client = session.client('s3', config=retry_config)
         buckets = s3_client.list_buckets().get('Buckets', [])
         
         for bucket in buckets:
             bucket_info = {
                 'Name': bucket['Name'],
                 'CreationDate': bucket['CreationDate'].strftime('%Y-%m-%d %H:%M:%S'),
+                'Region': 'global',
                 'AccountId': account_id,
                 'AccountName': account_name if account_name else 'N/A'
             }
             
-            # Get bucket region
+            # Try to get bucket location
             try:
                 location = s3_client.get_bucket_location(Bucket=bucket['Name'])
-                region = location.get('LocationConstraint', 'us-east-1')
-                if region is None:  # us-east-1 returns None
-                    region = 'us-east-1'
-                bucket_info['Region'] = region
-            except Exception:
-                bucket_info['Region'] = 'unknown'
-            
-            # Get bucket size (optional, can be expensive for large buckets)
-            # This is commented out as it can be expensive and slow for large buckets
-            # try:
-            #     metrics = cloudwatch_client.get_metric_statistics(
-            #         Namespace='AWS/S3',
-            #         MetricName='BucketSizeBytes',
-            #         Dimensions=[
-            #             {'Name': 'BucketName', 'Value': bucket['Name']},
-            #             {'Name': 'StorageType', 'Value': 'StandardStorage'}
-            #         ],
-            #         StartTime=datetime.now() - timedelta(days=2),
-            #         EndTime=datetime.now(),
-            #         Period=86400,
-            #         Statistics=['Average']
-            #     )
-            #     if metrics['Datapoints']:
-            #         bucket_info['SizeBytes'] = metrics['Datapoints'][0]['Average']
-            #     else:
-            #         bucket_info['SizeBytes'] = 0
-            # except Exception:
-            #     bucket_info['SizeBytes'] = 'unknown'
+                region_name = location.get('LocationConstraint')
+                if region_name is None:
+                    region_name = 'us-east-1'  # Default region if None
+                elif region_name == 'EU':
+                    region_name = 'eu-west-1'  # Map EU to eu-west-1
+                bucket_info['Region'] = region_name
+            except Exception as e:
+                logger.warning(f"Could not determine region for bucket {bucket['Name']}: {e}")
             
             high_cost_services['s3_buckets'].append(bucket_info)
         
-        logger.info(f"Found {len(buckets)} S3 Buckets")
+        logger.info(f"Found {len(high_cost_services['s3_buckets'])} S3 buckets")
     except Exception as e:
-        logger.error(f"Error collecting S3 Buckets: {e}")
+        logger.error(f"Error collecting S3 buckets: {e}")
+    
+    # Process regional services in parallel
+    def process_region(region):
+        region_results = {
+            'elbs': collect_elbs(region),
+            'nat_gateways': collect_nat_gateways(region),
+            'rds_instances': collect_rds_instances(region)
+        }
+        return region_results
+    
+    # Use ThreadPoolExecutor to process regions in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(regions))) as executor:
+        future_to_region = {executor.submit(process_region, region): region for region in regions}
+        
+        for future in concurrent.futures.as_completed(future_to_region):
+            region = future_to_region[future]
+            try:
+                region_results = future.result()
+                high_cost_services['elbs'].extend(region_results['elbs'])
+                high_cost_services['nat_gateways'].extend(region_results['nat_gateways'])
+                high_cost_services['rds_instances'].extend(region_results['rds_instances'])
+            except Exception as e:
+                logger.error(f"Exception processing region {region}: {e}")
     
     return high_cost_services
 
@@ -255,7 +286,6 @@ if __name__ == "__main__":
     print("=== NAT Gateways ===")
     for nat in services['nat_gateways']:
         print(f"ID: {nat['NatGatewayId']}")
-        print(f"Name: {nat['Name']}")
         print(f"State: {nat['State']}")
         print(f"Region: {nat['Region']}")
         print("-" * 50)
@@ -274,7 +304,7 @@ if __name__ == "__main__":
         print(f"Identifier: {instance['DBInstanceIdentifier']}")
         print(f"Engine: {instance['Engine']} {instance['EngineVersion']}")
         print(f"Class: {instance['DBInstanceClass']}")
-        print(f"Storage: {instance['AllocatedStorage']} GB ({instance['StorageType']})")
+        print(f"Storage: {instance['AllocatedStorage']} GB")
         print(f"Multi-AZ: {instance['MultiAZ']}")
         print(f"Region: {instance['Region']}")
         print("-" * 50) 

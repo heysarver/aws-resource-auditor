@@ -14,6 +14,7 @@ A Python tool for auditing AWS resources across accounts and sub-accounts within
   - NAT Gateways
   - S3 Buckets
   - RDS Instances
+- **Multithreaded Processing**: Parallel processing of accounts and regions for faster auditing
 - **CSV Reporting**: Generate CSV reports for easy import into dashboards
 - **Logging**: Maintain local logs for audit tracking
 
@@ -49,50 +50,37 @@ If you prefer to set up manually:
 
 ## Usage
 
-### Using the Wrapper Script
-
-The easiest way to run the AWS Resource Auditor is using the wrapper script:
+Run the AWS Resource Auditor using the wrapper script:
 
 ```bash
-./aws-auditor.sh --profile <aws_profile> --regions us-east-1,us-west-1 --services ec2,s3,rds
+./aws-auditor.sh [options]
 ```
 
-#### Cross-Account Auditing
-
-To audit all accounts in your organization:
-
-```bash
-./aws-auditor.sh --profile <aws_profile> --role <role_name> --audit-all-accounts
-```
-
-This will:
-1. Enumerate all accounts in your organization
-2. Assume the specified role in each account
-3. Audit resources in each account
-4. Generate individual reports for each account
-5. Generate consolidated reports across all accounts
-
-### Available Options
+### Options
 
 - `--profile PROFILE`: AWS profile to use (default: default)
-- `--role ROLE`: Role to assume when switching organizations (required for cross-account auditing)
+- `--role ROLE`: Role to assume when switching organizations
 - `--regions REGIONS`: Comma-separated list of AWS regions to scan (default: all regions)
 - `--services SERVICES`: Comma-separated list of services to audit (default: all services)
 - `--audit-all-accounts`: Audit all accounts in the organization (requires --role)
+- `--max-workers N`: Maximum number of worker threads for parallel processing (default: 5)
 - `--help`: Display help message and exit
 
-### Running Directly
+### Examples
 
-You can also run the main script directly:
-
+Audit EC2 and S3 resources in specific regions using a custom profile:
 ```bash
-python src/main.py --profile <aws_profile> --regions us-east-1,us-west-1 --services ec2,s3,rds
+./aws-auditor.sh --profile myprofile --regions us-east-1,us-west-2 --services ec2,s3
 ```
 
-For cross-account auditing:
-
+Audit all resources across all accounts in your organization:
 ```bash
-python src/main.py --profile <aws_profile> --role <role_name> --audit-all-accounts
+./aws-auditor.sh --profile myprofile --role AuditRole --audit-all-accounts
+```
+
+Audit all accounts with increased parallelism (10 worker threads):
+```bash
+./aws-auditor.sh --profile myprofile --role AuditRole --audit-all-accounts --max-workers 10
 ```
 
 ## Reports

@@ -10,6 +10,7 @@ import boto3
 import botocore.exceptions
 import time
 from botocore.config import Config
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +146,11 @@ def collect_ec2_instances(profile_name=None, role_arn=None, regions=None, org_id
             logger.error(f"Error getting account ID: {e}")
             account_id = "Unknown"
     
-    # Iterate through regions
-    for region in regions:
+    # Define a worker function to process a single region
+    def process_region(region):
+        region_instances = []
         try:
-            ec2_client = session.client('ec2', region_name=region)
+            ec2_client = session.client('ec2', region_name=region, config=retry_config)
             paginator = ec2_client.get_paginator('describe_instances')
             
             for page in paginator.paginate():
@@ -177,11 +179,33 @@ def collect_ec2_instances(profile_name=None, role_arn=None, regions=None, org_id
                         if 'Name' not in instance_info:
                             instance_info['Name'] = 'N/A'
                         
-                        ec2_instances.append(instance_info)
+                        region_instances.append(instance_info)
             
-            logger.info(f"Found {len(ec2_instances)} EC2 instances in region {region}")
+            logger.info(f"Found {len(region_instances)} EC2 instances in region {region}")
+            return region_instances
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'AuthFailure':
+                logger.warning(f"Authentication failure in region {region}. The region may not be enabled for your account.")
+            elif e.response['Error']['Code'] == 'UnauthorizedOperation':
+                logger.error(f"Unauthorized operation in region {region}. Check your IAM permissions.")
+            else:
+                logger.error(f"Error collecting EC2 instances in region {region}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error collecting EC2 instances in region {region}: {e}")
+            logger.error(f"Unexpected error in region {region}: {e}")
+            return []
+    
+    # Use ThreadPoolExecutor to process regions in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(regions))) as executor:
+        future_to_region = {executor.submit(process_region, region): region for region in regions}
+        
+        for future in concurrent.futures.as_completed(future_to_region):
+            region = future_to_region[future]
+            try:
+                region_instances = future.result()
+                ec2_instances.extend(region_instances)
+            except Exception as e:
+                logger.error(f"Exception processing region {region}: {e}")
     
     return ec2_instances
 

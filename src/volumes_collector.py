@@ -10,6 +10,7 @@ import logging
 import boto3
 import botocore.exceptions
 from botocore.config import Config
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -197,44 +198,43 @@ def collect_volumes(profile_name=None, role_arn=None, regions=None, session=None
             logger.error(f"Error getting account ID: {e}")
             account_id = "Unknown"
     
-    # Iterate through regions
-    for region in regions:
+    # Define a worker function to process a single region
+    def process_region(region):
+        region_volumes = []
         try:
-            ec2_client = session.client('ec2', region_name=region)
-            paginator = ec2_client.get_paginator('describe_volumes')
+            # Get volumes in the region
+            region_volumes = get_volumes(session, region)
             
-            for page in paginator.paginate():
-                for volume in page['Volumes']:
-                    # Extract volume information
-                    volume_info = {
-                        'VolumeId': volume['VolumeId'],
-                        'Size': volume['Size'],
-                        'VolumeType': volume['VolumeType'],
-                        'State': volume['State'],
-                        'CreateTime': volume['CreateTime'].strftime('%Y-%m-%d %H:%M:%S'),
-                        'AvailabilityZone': volume['AvailabilityZone'],
-                        'Region': region,
-                        'AccountId': account_id,
-                        'AccountName': account_name if account_name else 'N/A',
-                        'Attachments': len(volume.get('Attachments', [])),
-                        'Encrypted': volume.get('Encrypted', False)
-                    }
-                    
-                    # Extract volume name from tags
-                    if 'Tags' in volume:
-                        for tag in volume['Tags']:
-                            if tag['Key'] == 'Name':
-                                volume_info['Name'] = tag['Value']
-                                break
-                    
-                    if 'Name' not in volume_info:
-                        volume_info['Name'] = 'N/A'
-                    
-                    volumes.append(volume_info)
+            # Add account information to each volume
+            for volume in region_volumes:
+                volume['AccountId'] = account_id
+                volume['AccountName'] = account_name if account_name else 'N/A'
             
-            logger.info(f"Found {len(volumes)} EBS volumes in region {region}")
+            logger.info(f"Found {len(region_volumes)} EBS volumes in region {region}")
+            return region_volumes
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'AuthFailure':
+                logger.warning(f"Authentication failure in region {region}. The region may not be enabled for your account.")
+            elif e.response['Error']['Code'] == 'UnauthorizedOperation':
+                logger.error(f"Unauthorized operation in region {region}. Check your IAM permissions.")
+            else:
+                logger.error(f"Error collecting EBS volumes in region {region}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error collecting EBS volumes in region {region}: {e}")
+            logger.error(f"Unexpected error in region {region}: {e}")
+            return []
+    
+    # Use ThreadPoolExecutor to process regions in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(regions))) as executor:
+        future_to_region = {executor.submit(process_region, region): region for region in regions}
+        
+        for future in concurrent.futures.as_completed(future_to_region):
+            region = future_to_region[future]
+            try:
+                region_volumes = future.result()
+                volumes.extend(region_volumes)
+            except Exception as e:
+                logger.error(f"Exception processing region {region}: {e}")
     
     return volumes
 

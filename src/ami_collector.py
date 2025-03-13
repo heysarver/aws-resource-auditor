@@ -10,6 +10,7 @@ import boto3
 import botocore.exceptions
 from botocore.config import Config
 from datetime import datetime, timezone
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -195,51 +196,70 @@ def collect_unused_amis(profile_name=None, role_arn=None, regions=None, session=
             logger.error(f"Error getting account ID: {e}")
             account_id = "Unknown"
     
-    # Iterate through regions
-    for region in regions:
+    # Define a worker function to process a single region
+    def process_region(region):
+        region_unused_amis = []
         try:
-            ec2_client = session.client('ec2', region_name=region)
+            ec2_client = session.client('ec2', region_name=region, config=retry_config)
             
             # Get all AMIs owned by this account
             response = ec2_client.describe_images(Owners=['self'])
             amis = response.get('Images', [])
             
             # Get all EC2 instances
-            instances_response = ec2_client.describe_instances()
             instances = []
-            for reservation in instances_response.get('Reservations', []):
-                instances.extend(reservation.get('Instances', []))
+            paginator = ec2_client.get_paginator('describe_instances')
             
-            # Extract AMI IDs used by instances
-            used_ami_ids = set()
-            for instance in instances:
-                if 'ImageId' in instance:
-                    used_ami_ids.add(instance['ImageId'])
+            for page in paginator.paginate():
+                for reservation in page['Reservations']:
+                    instances.extend(reservation['Instances'])
+            
+            # Get AMI IDs used by instances
+            used_ami_ids = set(instance['ImageId'] for instance in instances if 'ImageId' in instance)
             
             # Find unused AMIs
             for ami in amis:
                 if ami['ImageId'] not in used_ami_ids:
-                    # Calculate age in days
-                    creation_date = datetime.strptime(ami['CreationDate'], '%Y-%m-%dT%H:%M:%S.%fZ')
-                    age_days = (datetime.now(timezone.utc) - creation_date.replace(tzinfo=timezone.utc)).days
-                    
+                    # Extract AMI information
                     ami_info = {
                         'ImageId': ami['ImageId'],
                         'Name': ami.get('Name', 'N/A'),
                         'Description': ami.get('Description', 'N/A'),
-                        'CreationDate': ami['CreationDate'],
-                        'AgeDays': age_days,
-                        'State': ami['State'],
+                        'CreationDate': ami.get('CreationDate', 'N/A'),
+                        'State': ami.get('State', 'N/A'),
+                        'Public': ami.get('Public', False),
                         'Region': region,
                         'AccountId': account_id,
                         'AccountName': account_name if account_name else 'N/A'
                     }
                     
-                    unused_amis.append(ami_info)
+                    region_unused_amis.append(ami_info)
             
-            logger.info(f"Found {len(unused_amis)} unused AMIs in region {region}")
+            logger.info(f"Found {len(region_unused_amis)} unused AMIs in region {region}")
+            return region_unused_amis
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'AuthFailure':
+                logger.warning(f"Authentication failure in region {region}. The region may not be enabled for your account.")
+            elif e.response['Error']['Code'] == 'UnauthorizedOperation':
+                logger.error(f"Unauthorized operation in region {region}. Check your IAM permissions.")
+            else:
+                logger.error(f"Error collecting unused AMIs in region {region}: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error collecting unused AMIs in region {region}: {e}")
+            logger.error(f"Unexpected error in region {region}: {e}")
+            return []
+    
+    # Use ThreadPoolExecutor to process regions in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(regions))) as executor:
+        future_to_region = {executor.submit(process_region, region): region for region in regions}
+        
+        for future in concurrent.futures.as_completed(future_to_region):
+            region = future_to_region[future]
+            try:
+                region_unused_amis = future.result()
+                unused_amis.extend(region_unused_amis)
+            except Exception as e:
+                logger.error(f"Exception processing region {region}: {e}")
     
     return unused_amis
 

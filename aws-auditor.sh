@@ -7,6 +7,7 @@ REGIONS=""
 SERVICES="all"
 ROLE=""
 AUDIT_ALL_ACCOUNTS=false
+MAX_WORKERS=5
 
 # Display help message
 function show_help {
@@ -20,11 +21,12 @@ function show_help {
     echo "  --regions REGIONS       Comma-separated list of AWS regions to scan (default: all regions)"
     echo "  --services SERVICES     Comma-separated list of services to audit (default: all services)"
     echo "  --audit-all-accounts    Audit all accounts in the organization (requires --role)"
+    echo "  --max-workers N         Maximum number of worker threads for parallel processing (default: 5)"
     echo "  --help                  Display this help message and exit"
     echo ""
     echo "Example:"
     echo "  $0 --profile myprofile --regions us-east-1,us-west-2 --services ec2,s3"
-    echo "  $0 --profile myprofile --role AuditRole --audit-all-accounts"
+    echo "  $0 --profile myprofile --role AuditRole --audit-all-accounts --max-workers 10"
     exit 0
 }
 
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
         --audit-all-accounts)
             AUDIT_ALL_ACCOUNTS=true
             shift
+            ;;
+        --max-workers)
+            MAX_WORKERS="$2"
+            shift 2
             ;;
         --help)
             show_help
@@ -90,6 +96,8 @@ fi
 if [ "$AUDIT_ALL_ACCOUNTS" = true ]; then
     CMD="${CMD} --audit-all-accounts"
 fi
+
+CMD="${CMD} --max-workers ${MAX_WORKERS}"
 
 # Run the command
 echo "Running: python ${CMD}"

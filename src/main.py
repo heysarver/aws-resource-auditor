@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+import concurrent.futures
 
 # Import collector modules
 import aws_org_enumerator
@@ -56,6 +57,9 @@ def parse_arguments():
     
     parser.add_argument('--audit-all-accounts', action='store_true',
                         help='Audit all accounts in the organization (requires --role)')
+    
+    parser.add_argument('--max-workers', type=int, default=5,
+                        help='Maximum number of worker threads for parallel account auditing (default: 5)')
     
     return parser.parse_args()
 
@@ -115,10 +119,10 @@ def audit_account(profile_name, role_name, account_id, account_name, regions, se
         'high_cost_services': {}
     }
     
-    # Step 2: Collect EC2 instances
-    if not services_to_audit or 'ec2' in services_to_audit:
-        logger.info(f"Collecting EC2 instances for account {account_name}")
+    # Define worker functions for each service to be used with ThreadPoolExecutor
+    def collect_ec2_worker():
         try:
+            logger.info(f"Collecting EC2 instances for account {account_name}")
             ec2_instances = ec2_collector.collect_ec2_instances(
                 session=session,
                 regions=regions,
@@ -126,69 +130,100 @@ def audit_account(profile_name, role_name, account_id, account_name, regions, se
                 account_id=account_id,
                 account_name=account_name
             )
-            results['ec2_instances'] = ec2_instances
             logger.info(f"Found {len(ec2_instances)} EC2 instances in account {account_name}")
+            return ec2_instances
         except Exception as e:
             error_reporter.error_collector.add_error(
                 'EC2', 'CollectInstances', ','.join(regions), account_id, str(e)
             )
             logger.error(f"Error collecting EC2 instances for account {account_name}: {e}")
+            return []
     
-    # Step 3: Collect EBS volumes
-    if not services_to_audit or 'volumes' in services_to_audit:
-        logger.info(f"Collecting EBS volumes for account {account_name}")
+    def collect_volumes_worker():
         try:
+            logger.info(f"Collecting EBS volumes for account {account_name}")
             volumes = volumes_collector.collect_volumes(
                 session=session,
                 regions=regions,
                 account_id=account_id,
                 account_name=account_name
             )
-            results['volumes'] = volumes
             logger.info(f"Found {len(volumes)} EBS volumes in account {account_name}")
+            return volumes
         except Exception as e:
             error_reporter.error_collector.add_error(
                 'EBS', 'CollectVolumes', ','.join(regions), account_id, str(e)
             )
             logger.error(f"Error collecting EBS volumes for account {account_name}: {e}")
+            return []
     
-    # Step 4: Detect unused AMIs
-    if not services_to_audit or 'amis' in services_to_audit:
-        logger.info(f"Detecting unused AMIs for account {account_name}")
+    def collect_amis_worker():
         try:
+            logger.info(f"Detecting unused AMIs for account {account_name}")
             unused_amis = ami_collector.collect_unused_amis(
                 session=session,
                 regions=regions,
                 account_id=account_id,
                 account_name=account_name
             )
-            results['unused_amis'] = unused_amis
             logger.info(f"Found {len(unused_amis)} unused AMIs in account {account_name}")
+            return unused_amis
         except Exception as e:
             error_reporter.error_collector.add_error(
                 'AMI', 'CollectUnusedAMIs', ','.join(regions), account_id, str(e)
             )
             logger.error(f"Error collecting unused AMIs for account {account_name}: {e}")
+            return []
     
-    # Step 5: Collect high-cost services
-    high_cost_services_to_audit = [s for s in ['elb', 'nat', 's3', 'rds'] if not services_to_audit or s in services_to_audit]
-    
-    if high_cost_services_to_audit:
-        logger.info(f"Collecting high-cost services for account {account_name}")
+    def collect_high_cost_services_worker():
         try:
+            logger.info(f"Collecting high-cost services for account {account_name}")
             high_cost_services = high_cost_inventory.collect_high_cost_services(
                 session=session,
                 regions=regions,
                 account_id=account_id,
                 account_name=account_name
             )
-            results['high_cost_services'] = high_cost_services
             logger.info(f"Found high-cost services in account {account_name}")
+            return high_cost_services
         except Exception as e:
             error_reporter.error_collector.add_error(
                 'HighCostServices', 'CollectServices', ','.join(regions), account_id, str(e)
             )
             logger.error(f"Error collecting high-cost services for account {account_name}: {e}")
+            return {}
+    
+    # Create a list of tasks to run in parallel based on services_to_audit
+    tasks = []
+    task_names = []
+    
+    if not services_to_audit or 'ec2' in services_to_audit:
+        tasks.append(collect_ec2_worker)
+        task_names.append('ec2_instances')
+    
+    if not services_to_audit or 'volumes' in services_to_audit:
+        tasks.append(collect_volumes_worker)
+        task_names.append('volumes')
+    
+    if not services_to_audit or 'amis' in services_to_audit:
+        tasks.append(collect_amis_worker)
+        task_names.append('unused_amis')
+    
+    high_cost_services_to_audit = [s for s in ['elb', 'nat', 's3', 'rds'] if not services_to_audit or s in services_to_audit]
+    if high_cost_services_to_audit:
+        tasks.append(collect_high_cost_services_worker)
+        task_names.append('high_cost_services')
+    
+    # Use ThreadPoolExecutor to run tasks in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = [executor.submit(task) for task in tasks]
+        
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            try:
+                result = future.result()
+                results[task_names[i]] = result
+            except Exception as e:
+                logger.error(f"Error in task {task_names[i]}: {e}")
     
     return results
 
@@ -299,31 +334,48 @@ def main():
                 error_reporter.error_collector.print_error_summary()
             return
         
-        # Audit each account
+        # Audit each account in parallel using ThreadPoolExecutor
+        active_accounts = [account for account in accounts if account['Status'] == 'ACTIVE']
+        logger.info(f"Auditing {len(active_accounts)} active accounts with {args.max_workers} worker threads")
+        
         all_results = {}
-        for account in accounts:
-            if account['Status'] == 'ACTIVE':
-                account_id = account['Id']
-                account_name = account.get('Name', 'Unknown')
-                
+        
+        # Define a worker function for ThreadPoolExecutor
+        def audit_account_worker(account):
+            account_id = account['Id']
+            account_name = account.get('Name', 'Unknown')
+            
+            try:
+                return account_id, audit_account(
+                    profile_name=args.profile,
+                    role_name=args.role,
+                    account_id=account_id,
+                    account_name=account_name,
+                    regions=regions,
+                    services_to_audit=services_to_audit,
+                    timestamp=timestamp,
+                    org_id=org_id
+                )
+            except Exception as e:
+                error_reporter.error_collector.add_error(
+                    'Audit', 'AuditAccount', 'all', account_id, str(e)
+                )
+                logger.error(f"Error auditing account {account_name} ({account_id}): {e}")
+                return account_id, {}
+        
+        # Use ThreadPoolExecutor to process accounts in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+            future_to_account = {executor.submit(audit_account_worker, account): account for account in active_accounts}
+            
+            for future in concurrent.futures.as_completed(future_to_account):
+                account = future_to_account[future]
                 try:
-                    account_results = audit_account(
-                        profile_name=args.profile,
-                        role_name=args.role,
-                        account_id=account_id,
-                        account_name=account_name,
-                        regions=regions,
-                        services_to_audit=services_to_audit,
-                        timestamp=timestamp,
-                        org_id=org_id
-                    )
-                    
-                    all_results[account_id] = account_results
+                    account_id, account_results = future.result()
+                    if account_results:
+                        all_results[account_id] = account_results
+                        logger.info(f"Completed audit for account: {account.get('Name', 'Unknown')} ({account['Id']})")
                 except Exception as e:
-                    error_reporter.error_collector.add_error(
-                        'Audit', 'AuditAccount', 'all', account_id, str(e)
-                    )
-                    logger.error(f"Error auditing account {account_name} ({account_id}): {e}")
+                    logger.error(f"Exception processing account {account.get('Name', 'Unknown')} ({account['Id']}): {e}")
         
         # Combine results from all accounts for consolidated reports
         all_ec2_instances = []
