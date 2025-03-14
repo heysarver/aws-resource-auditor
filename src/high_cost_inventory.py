@@ -247,18 +247,26 @@ def collect_high_cost_services(profile_name=None, role_arn=None, regions=None, s
         return region_results
     
     # Use ThreadPoolExecutor to process regions in parallel
+    region_results_dict = {}
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(regions))) as executor:
         future_to_region = {executor.submit(process_region, region): region for region in regions}
         
+        # Process results as they complete and store them in a dictionary keyed by region
         for future in concurrent.futures.as_completed(future_to_region):
             region = future_to_region[future]
             try:
                 region_results = future.result()
-                high_cost_services['elbs'].extend(region_results['elbs'])
-                high_cost_services['nat_gateways'].extend(region_results['nat_gateways'])
-                high_cost_services['rds_instances'].extend(region_results['rds_instances'])
+                if region_results:
+                    region_results_dict[region] = region_results
             except Exception as e:
                 logger.error(f"Exception processing region {region}: {e}")
+    
+    # Only after all futures are complete, append the results to the main dictionary
+    for region, results in region_results_dict.items():
+        for service_key in ['elbs', 'nat_gateways', 'rds_instances']:
+            if service_key in results and results[service_key]:
+                high_cost_services[service_key].extend(results[service_key])
     
     return high_cost_services
 

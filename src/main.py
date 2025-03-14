@@ -216,14 +216,19 @@ def audit_account(profile_name, role_name, account_id, account_name, regions, se
     
     # Use ThreadPoolExecutor to run tasks in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(task) for task in tasks]
+        # Map future objects to their task names to maintain the correct association
+        future_to_task_name = {executor.submit(task): task_name for task, task_name in zip(tasks, task_names)}
         
-        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+        # Process each future as it completes
+        for future in concurrent.futures.as_completed(future_to_task_name.keys()):
+            task_name = future_to_task_name[future]
             try:
                 result = future.result()
-                results[task_names[i]] = result
+                results[task_name] = result
+                logger.info(f"Completed task {task_name} for account {account_name}")
             except Exception as e:
-                logger.error(f"Error in task {task_names[i]}: {e}")
+                logger.error(f"Error in task {task_name}: {e}")
+                results[task_name] = [] if task_name != 'high_cost_services' else {}
     
     return results
 
@@ -393,9 +398,16 @@ def main():
             all_volumes.extend(results.get('volumes', []))
             all_unused_amis.extend(results.get('unused_amis', []))
             
-            for service, items in results.get('high_cost_services', {}).items():
-                if service in all_high_cost_services:
-                    all_high_cost_services[service].extend(items)
+            # Check if high_cost_services is a dictionary before trying to iterate through its items
+            high_cost_services_result = results.get('high_cost_services', {})
+            if isinstance(high_cost_services_result, dict):
+                for service, items in high_cost_services_result.items():
+                    if service in all_high_cost_services:
+                        all_high_cost_services[service].extend(items)
+            # If high_cost_services is not a dictionary (possibly a list or other type), log an error
+            else:
+                logger.error(f"high_cost_services for account {account_id} is not a dictionary: {type(high_cost_services_result)}")
+                logger.error(f"Skipping high cost services processing for account {account_id}")
         
         # Generate consolidated reports
         try:

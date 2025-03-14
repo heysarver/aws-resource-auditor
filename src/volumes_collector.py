@@ -225,16 +225,25 @@ def collect_volumes(profile_name=None, role_arn=None, regions=None, session=None
             return []
     
     # Use ThreadPoolExecutor to process regions in parallel
+    volumes = []  # Clear this to ensure we only have volumes from this function call
+    region_results = {}
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(regions))) as executor:
         future_to_region = {executor.submit(process_region, region): region for region in regions}
         
+        # Process results as they complete and store them in a dictionary keyed by region
         for future in concurrent.futures.as_completed(future_to_region):
             region = future_to_region[future]
             try:
                 region_volumes = future.result()
-                volumes.extend(region_volumes)
+                if region_volumes:
+                    region_results[region] = region_volumes
             except Exception as e:
                 logger.error(f"Exception processing region {region}: {e}")
+    
+    # Only after all futures are complete, append the results to the main list
+    for region, region_volumes in region_results.items():
+        volumes.extend(region_volumes)
     
     return volumes
 
