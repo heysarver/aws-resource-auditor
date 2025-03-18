@@ -85,9 +85,10 @@ def generate_volumes_report(volumes, timestamp):
         with open(report_file, 'w', newline='') as csvfile:
             fieldnames = [
                 'Name', 'VolumeId', 'Size', 'VolumeType', 
-                'State', 'CreateTime', 'AvailabilityZone', 
-                'Attachments', 'Encrypted', 'Region', 
-                'AccountId', 'AccountName'
+                'State', 'CreateTime', 'AvailabilityZone',
+                'InstanceId', 'InstanceName', 'Device',
+                'AttachmentState', 'AttachmentInfo',
+                'Region', 'AccountId', 'AccountName'
             ]
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
@@ -101,8 +102,11 @@ def generate_volumes_report(volumes, timestamp):
                     'State': volume.get('State', 'N/A'),
                     'CreateTime': volume.get('CreateTime', 'N/A'),
                     'AvailabilityZone': volume.get('AvailabilityZone', 'N/A'),
-                    'Attachments': volume.get('Attachments', 'N/A'),
-                    'Encrypted': volume.get('Encrypted', 'N/A'),
+                    'InstanceId': volume.get('InstanceId', 'N/A'),
+                    'InstanceName': volume.get('InstanceName', 'N/A'),
+                    'Device': volume.get('Device', 'N/A'),
+                    'AttachmentState': volume.get('AttachmentState', 'N/A'),
+                    'AttachmentInfo': volume.get('AttachmentInfo', 'N/A'),
                     'Region': volume.get('Region', 'N/A'),
                     'AccountId': volume.get('AccountId', 'N/A'),
                     'AccountName': volume.get('AccountName', 'N/A')

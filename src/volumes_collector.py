@@ -100,15 +100,34 @@ def get_volumes(session, region):
                     'AvailabilityZone': volume['AvailabilityZone'],
                     'Region': region,
                     'InstanceId': 'N/A',
-                    'InstanceName': 'N/A'
+                    'InstanceName': 'N/A',
+                    'Device': 'N/A',
+                    'AttachmentState': 'N/A',
+                    'AttachmentInfo': 'N/A'
                 }
                 
                 # Map volume to instance if attached
                 if 'Attachments' in volume and volume['Attachments']:
-                    attachment = volume['Attachments'][0]  # Get the first attachment
-                    instance_id = attachment.get('InstanceId', 'N/A')
+                    # Get the first attachment - volumes typically have one attachment
+                    attachment = volume['Attachments'][0]
+                    instance_id = attachment['InstanceId']  # This should always be present if attached
+                    device = attachment['Device']  # This should always be present if attached
+                    attach_state = attachment['State']  # This should always be present if attached
+                    
                     volume_info['InstanceId'] = instance_id
                     volume_info['InstanceName'] = instance_map.get(instance_id, 'N/A')
+                    volume_info['Device'] = device
+                    volume_info['AttachmentState'] = attach_state
+                    # Format the attachment info to match AWS Console format
+                    instance_name = instance_map.get(instance_id, '')
+                    instance_display = f"{instance_id} ({instance_name})" if instance_name else instance_id
+                    volume_info['AttachmentInfo'] = f"{instance_display}: {device} ({attach_state})"
+                else:
+                    volume_info['InstanceId'] = 'N/A'
+                    volume_info['InstanceName'] = 'N/A'
+                    volume_info['Device'] = 'N/A'
+                    volume_info['AttachmentState'] = 'N/A'
+                    volume_info['AttachmentInfo'] = 'N/A'
                 
                 # Extract volume name from tags
                 if 'Tags' in volume:
@@ -267,5 +286,8 @@ if __name__ == "__main__":
         print(f"State: {volume['State']}")
         print(f"Instance ID: {volume['InstanceId']}")
         print(f"Instance Name: {volume['InstanceName']}")
+        print(f"Device: {volume['Device']}")
+        print(f"Attachment State: {volume['AttachmentState']}")
+        print(f"Attachment Info: {volume['AttachmentInfo']}")
         print(f"Region: {volume['Region']}")
         print("-" * 50) 
