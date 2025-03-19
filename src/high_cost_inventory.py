@@ -14,6 +14,7 @@ import boto3
 import botocore.exceptions
 from botocore.config import Config
 import concurrent.futures
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +217,18 @@ def collect_high_cost_services(profile_name=None, role_arn=None, regions=None, s
                 'CreationDate': bucket['CreationDate'].strftime('%Y-%m-%d %H:%M:%S'),
                 'Region': 'global',
                 'AccountId': account_id,
-                'AccountName': account_name if account_name else 'N/A'
+                'AccountName': account_name if account_name else 'N/A',
+                'SizeGB': 0,
+                'StorageTier': {
+                    'StandardStorage': 0,
+                    'IntelligentTieringStorage': 0,
+                    'StandardIAStorage': 0,
+                    'OneZoneIAStorage': 0,
+                    'ReducedRedundancyStorage': 0,
+                    'GlacierStorage': 0,
+                    'GlacierDeepArchiveStorage': 0,
+                    'GlacierIRStorage': 0
+                }
             }
             
             # Try to get bucket location
@@ -228,6 +240,64 @@ def collect_high_cost_services(profile_name=None, role_arn=None, regions=None, s
                 elif region_name == 'EU':
                     region_name = 'eu-west-1'  # Map EU to eu-west-1
                 bucket_info['Region'] = region_name
+                
+                # Get bucket size and storage tier information using CloudWatch metrics
+                try:
+                    cloudwatch = session.client('cloudwatch', region_name=region_name, config=retry_config)
+                    
+                    # Get bucket size in bytes
+                    size_response = cloudwatch.get_metric_statistics(
+                        Namespace='AWS/S3',
+                        MetricName='BucketSizeBytes',
+                        Dimensions=[
+                            {'Name': 'BucketName', 'Value': bucket['Name']},
+                            {'Name': 'StorageType', 'Value': 'StandardStorage'}
+                        ],
+                        StartTime=datetime.now() - timedelta(days=2),
+                        EndTime=datetime.now(),
+                        Period=86400,  # 1 day in seconds
+                        Statistics=['Average']
+                    )
+                    
+                    # Get storage tier information
+                    storage_types = [
+                        'StandardStorage', 'IntelligentTieringStorage', 'StandardIAStorage', 
+                        'OneZoneIAStorage', 'ReducedRedundancyStorage', 'GlacierStorage', 
+                        'GlacierDeepArchiveStorage', 'GlacierIRStorage'
+                    ]
+                    
+                    total_size_bytes = 0
+                    for storage_type in storage_types:
+                        try:
+                            tier_response = cloudwatch.get_metric_statistics(
+                                Namespace='AWS/S3',
+                                MetricName='BucketSizeBytes',
+                                Dimensions=[
+                                    {'Name': 'BucketName', 'Value': bucket['Name']},
+                                    {'Name': 'StorageType', 'Value': storage_type}
+                                ],
+                                StartTime=datetime.now() - timedelta(days=2),
+                                EndTime=datetime.now(),
+                                Period=86400,  # 1 day in seconds
+                                Statistics=['Average']
+                            )
+                            
+                            # Extract the latest data point if available
+                            if tier_response['Datapoints']:
+                                latest_datapoint = max(tier_response['Datapoints'], key=lambda x: x['Timestamp'])
+                                size_bytes = latest_datapoint['Average']
+                                size_gb = size_bytes / (1024 ** 3)  # Convert bytes to GB
+                                bucket_info['StorageTier'][storage_type] = round(size_gb, 2)
+                                total_size_bytes += size_bytes
+                        except Exception as e:
+                            logger.warning(f"Error getting {storage_type} metrics for bucket {bucket['Name']}: {e}")
+                    
+                    # Set total size in GB
+                    bucket_info['SizeGB'] = round(total_size_bytes / (1024 ** 3), 2)
+                    
+                except Exception as e:
+                    logger.warning(f"Error getting size metrics for bucket {bucket['Name']}: {e}")
+                
             except Exception as e:
                 logger.warning(f"Could not determine region for bucket {bucket['Name']}: {e}")
             
@@ -304,6 +374,11 @@ if __name__ == "__main__":
         print(f"Name: {bucket['Name']}")
         print(f"Region: {bucket['Region']}")
         print(f"Creation Date: {bucket['CreationDate']}")
+        print(f"Size: {bucket['SizeGB']} GB")
+        print("Storage Tiers:")
+        for tier_name, tier_size in bucket['StorageTier'].items():
+            if tier_size > 0:
+                print(f"  - {tier_name}: {tier_size} GB")
         print("-" * 50)
     
     # Print RDS instance details

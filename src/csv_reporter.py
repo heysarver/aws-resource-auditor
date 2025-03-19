@@ -248,16 +248,33 @@ def generate_high_cost_services_reports(high_cost_services, timestamp):
         try:
             with open(report_file, 'w', newline='') as csvfile:
                 fieldnames = [
-                    'Name', 'CreationDate', 'Region', 'AccountId', 'AccountName'
+                    'Name', 'CreationDate', 'Region', 'SizeGB', 
+                    'StandardStorage', 'IntelligentTieringStorage', 
+                    'StandardIAStorage', 'OneZoneIAStorage', 
+                    'ReducedRedundancyStorage', 'GlacierStorage', 
+                    'GlacierDeepArchiveStorage', 'GlacierIRStorage',
+                    'AccountId', 'AccountName'
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 
                 writer.writeheader()
                 for bucket in high_cost_services['s3_buckets']:
+                    # Extract storage tier information for CSV row
+                    storage_tier = bucket.get('StorageTier', {})
+                    
                     writer.writerow({
                         'Name': bucket.get('Name', 'N/A'),
                         'CreationDate': bucket.get('CreationDate', 'N/A'),
                         'Region': bucket.get('Region', 'N/A'),
+                        'SizeGB': bucket.get('SizeGB', 0),
+                        'StandardStorage': storage_tier.get('StandardStorage', 0),
+                        'IntelligentTieringStorage': storage_tier.get('IntelligentTieringStorage', 0),
+                        'StandardIAStorage': storage_tier.get('StandardIAStorage', 0),
+                        'OneZoneIAStorage': storage_tier.get('OneZoneIAStorage', 0),
+                        'ReducedRedundancyStorage': storage_tier.get('ReducedRedundancyStorage', 0),
+                        'GlacierStorage': storage_tier.get('GlacierStorage', 0),
+                        'GlacierDeepArchiveStorage': storage_tier.get('GlacierDeepArchiveStorage', 0),
+                        'GlacierIRStorage': storage_tier.get('GlacierIRStorage', 0),
                         'AccountId': bucket.get('AccountId', 'N/A'),
                         'AccountName': bucket.get('AccountName', 'N/A')
                     })
